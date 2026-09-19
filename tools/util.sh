@@ -41,6 +41,7 @@ function apt_install() {
 }
 
 function check_and_install_package() {
+    [ -f /etc/arch-release ] && return 0
 	local PACKAGES=
 	if ! command -v mkfs.exfat &>/dev/null; then
 		if [ -f /etc/os-release ]; then
@@ -100,6 +101,13 @@ function check_and_install_package() {
 }
 
 function check_and_install_toolchain() {
+    if [ -f /etc/arch-release ]; then
+        command -v aarch64-linux-gnu-gcc >/dev/null || {
+            echo "aarch64-linux-gnu-gcc not found";
+            return 1;
+        }
+        return 0;
+    fi
 	local PACKAGES=
 	local requirements=("build-essential" "make" "device-tree-compiler" "bc" "cpio" "lz4" \
 		"flex" "bison" "libncurses-dev" "libssl-dev" "libelf-dev")
