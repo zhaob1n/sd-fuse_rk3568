@@ -24,6 +24,22 @@
     CMDLINE: mtdparts=rk29xxnand:0x00002000@0x00004000(uboot),0x00002000@0x00006000(misc),0x00002000@0x00008000(dtbo),0x00008000@0x0000a000(resource),0x00015000@0x00012000(kernel),0x00010000@0x00027000(boot),0x00010000@0x00037000(recovery),<ROOTFS_PARTITION_SIZE>@0x00047000(rootfs),-@<USERDATA_PARTITION_ADDR>(userdata:grow)
     ```
 
+### 3. 关键特性移植：TC eBPF `bpf_sk_assign` 原生支持 `SO_REUSEPORT`
+* **根因分析**：
+  * `dae` 为支持平滑热重载（Same-port zero-downtime reload），默认在监听 socket 上设置了 `SO_REUSEPORT`。
+  * 在 Linux 6.5 之前的内核（包括 RK3568 原生的 6.1 LTS）中，`net/core/filter.c` 中的 `bpf_sk_assign` 带有显式限制：
+    ```c
+    if (unlikely(sk_fullsock(sk) && sk->sk_reuseport))
+        return -ESOCKTNOSUPPORT; // 报错 -94
+    ```
+  * 当 `dae` 在 TC ingress 执行 `bpf_sk_assign` 时会被内核拒绝，导致数据包未成功绑定目标 socket 而进入协议栈引发**静默丢包（典型症状：本机 DNS UDP 53 解析完全超时，curl/ping 域名永久挂起）**。
+* **上游特性 Backport**：
+  * 完整移植了 Linux 主线（6.5/6.6）由 Lorenz Bauer & Daniel Borkmann 提交的 `SO_REUSEPORT support for TC bpf_sk_assign` 补丁系列核心（Patch 7）。
+  * 移除 `bpf_sk_assign` 对 `sk_reuseport` 的阻断限制，在 `skb` 记录 `prefetched` 标记。
+  * 传输层解包时通过 `inet_steal_sock()` / `inet6_steal_sock()` 延迟执行 `inet[6]_lookup_reuseport()` 完成监听派发。
+  * 引入 `!sk_fullsock(sk)` 边界检查，彻底防御握手期 `request_sock` / `timewait_sock` 引发的 KASAN 内存越界问题。
+  * **效果**：原版官方 `dae` 无需任何二进制机器码 Patch 即可直接正常运行。
+
 ---
 
 ## 二、 仓库改动清单
@@ -37,8 +53,12 @@
 | └─ `prebuilt/parameter-plain.txt` | | 同上（针对 plain 布局同步修改） |
 | **`kernel/`** (子仓库) | `r5s-ebpf` | |
 | ├─ `arch/arm64/configs/dae.config` | | 新增内核配置片段（包含 BPF、BTF、kprobe 等必需选项） |
-| └─ `tools/lib/bpf/libbpf.c` | | 修复新版 GCC 下 `next_path` 指针类型的类型不匹配编译告警 |
-
+| ├─ `tools/lib/bpf/libbpf.c` | | 修复新版 GCC 下 `next_path` 指针类型的类型不匹配编译告警 |
+| ├─ `include/net/sock.h` | | `skb_steal_sock` 增加 `bool *prefetched` 出参，跟踪 BPF 提前挂载状态 |
+| ├─ `include/net/inet_hashtables.h` | | 引入 `inet_steal_sock`，实现 IPv4 reuseport 分发并防范 `request_sock` 越界 |
+| ├─ `include/net/inet6_hashtables.h` | | 引入 `inet6_steal_sock`，实现 IPv6 reuseport 分发并防范 `request_sock` 越界 |
+| ├─ `net/core/filter.c` | | 移除 `bpf_sk_assign` 对 `sk_reuseport` 报错 `-ESOCKTNOSUPPORT` 的限制 |
+| └─ `net/ipv[46]/udp.c` | | 将 UDP 接收流程中 `skb_steal_sock` 替换为 `inet[6]_steal_sock` |
 ---
 
 ## 三、 宿主机依赖安装
@@ -97,13 +117,11 @@ lsblk -o NAME,SIZE,TYPE,TRAN,RM,MODEL
 ```
 假设确认 SD 卡为 `/dev/sdb`（通常为带有 `TRAN=usb`、`RM=1` 的磁盘）。
 
-### 2. 写入镜像并物理同步
+### 2. 写入镜像并物理落盘
 ```bash
 # 写入磁盘（请将 /dev/sdb 替换为你真实的 SD 卡设备名）
+# 注：conv=fsync 会在 dd 退出前调用系统调用 fsync() 确保所有脏页彻底落盘，无需额外执行 sync
 sudo dd if=out/rk3568-eflasher-debian-trixie-core-6.1-arm64-$(date +%Y%m%d).img of=/dev/sdb bs=4M status=progress conv=fsync
-
-# 彻底落盘所有写入缓存
-sudo sync
 ```
 
 ### 3. 安全弹出设备
