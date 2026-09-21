@@ -106,6 +106,16 @@ sudo ./mk-emmc-image.sh debian-trixie-core-arm64 autostart=yes
   * 实际磁盘占用（稀疏文件）仅约 **2.4 GB**。
   * 如果需要归档或分发，可用 `pigz -k -9 <img_file>` 压缩，压缩后体积约为 **900 MB**（与官方 release 一致）。
 
+
+### 3. 打包直接从 SD 卡启动的系统镜像（无需刷入 eMMC，直接运行）
+若不想刷机覆写板载 eMMC，而是希望将系统直接运行在 SD 卡上，执行：
+```bash
+./mk-sd-image.sh debian-trixie-core-arm64
+```
+* **完全免重新编译**：直接复用 `debian-trixie-core-arm64/` 目录中已编译好的内核与模块，**耗时仅需约 2~3 秒**。
+* **无需 root 权限**：不需要 `sudo` 挂载 loop 设备，纯用户态生成。
+* 构建产物位于：`out/rk3568-sd-debian-trixie-core-6.1-arm64-<DATE>.img`（实际物理体积仅约 **1.6 GB**）。
+* 烧录此镜像后直接插卡开机，板子会直接以 SD 卡为主系统启动运行。
 ---
 
 ## 五、 SD 卡烧录与安全弹出
